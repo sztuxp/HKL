@@ -819,7 +819,7 @@ class Spider(Spider):
         return {'list': [vod]}
 
     def _get_playlist_videos(self, playlist_id):
-        """核心修复：深度遍历结合正则兜底，精确定位合集内视频"""
+        """增强版（第821行）：绕过 YouTube 页面懒加载限制，通过 JSON 遍历 + 正则全局检索双重机制提取全部视频"""
         playlist_url = f"https://www.youtube.com/playlist?list={playlist_id}"
         try:
             r = self.session.get(playlist_url, timeout=10)
@@ -836,6 +836,7 @@ class Spider(Spider):
             videos = []
             seen_vids = set()
             
+            # 1. 优先采用深度遍历扫描首屏渲染好的 JSON
             def scan_playlist(obj):
                 if isinstance(obj, dict):
                     if 'playlistVideoRenderer' in obj:
@@ -871,14 +872,21 @@ class Spider(Spider):
 
             scan_playlist(data)
             
-            # 正则强力兜底：如果 JSON 路径有变，直接通过正则将页面内的视频 ID 全部抽取出来
-            if not videos:
-                debug_log("Warning: Depth scan failed, using regex fallback on playlist", {"id": playlist_id})
-                raw_matches = re.findall(r'"videoId"\s*:\s*"([0-9A-Za-z_-]{11})"', html_str)
-                for index, v_id in enumerate(raw_matches):
-                    if v_id not in seen_vids:
-                        seen_vids.add(v_id)
-                        videos.append(f"第 {index+1} 集${v_id}@best")
+            # 2. 核心突破：利用正则全局检索未渲染但存在于底层数据缓存里的视频 ID
+            # 排除掉常见的 YouTube 静态资源和预留非视频字符
+            blacklist_ids = {'default', 'hqdefault', 'mqdefault', 'sddefault', 'maxresdefa'}
+            
+            # 匹配包含在 watch?v= 以及 JSON 串内部所有的 11 位视频 ID
+            raw_matches = re.findall(r'/watch\?v=([0-9A-Za-z_-]{11})', html_str)
+            raw_matches += re.findall(r'"videoId"\s*:\s*"([0-9A-Za-z_-]{11})"', html_str)
+            
+            # 整理并追加去重
+            match_index = len(videos) + 1
+            for v_id in raw_matches:
+                if v_id and v_id not in seen_vids and v_id not in blacklist_ids:
+                    seen_vids.add(v_id)
+                    videos.append(f"第 {match_index} 集-${v_id}@best")
+                    match_index += 1
 
             debug_log("parsed playlist videos", {"id": playlist_id, "count": len(videos)})
             if videos:
