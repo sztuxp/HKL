@@ -19,8 +19,23 @@ DEBUG_LOG = '/sdcard/Download/0712youtube_trace.log'
 # type_id 填写播放列表的 playlist_id (即 list= 后面的参数)
 # type_name 填写你想要显示的分类名称
 YOUTUBE_CLASSES = [
-    {'type_id': 'PLtKJNVcMbjLTtSL1IudnX_XS9ywElex_E', 'type_name': '非诚勿扰2025'},
-    {'type_id': 'PLtKJNVcMbjLTNWAq-P0vZt-Rm7JYpGQdq', 'type_name': '非诚勿扰2024'},
+    {'type_id': 'PLtKJNVcMbjLQ_M-a0ZjniEdFJ3yXrem3x', 'type_name': '2026'},
+    {'type_id': 'PLtKJNVcMbjLTtSL1IudnX_XS9ywElex_E', 'type_name': '2025'},
+    {'type_id': 'PLtKJNVcMbjLTNWAq-P0vZt-Rm7JYpGQdq', 'type_name': '2024'},
+    {'type_id': 'PLtKJNVcMbjLQBej9ZrtDttmeM-ZuENQ3m', 'type_name': '2023'},
+    {'type_id': 'PLtKJNVcMbjLSdXJ_XkiYsVZtz8QA7j7Yh', 'type_name': '2022'},
+    {'type_id': 'PLtKJNVcMbjLSsnRb9ZONGFUh0nNzuIQxZ', 'type_name': '2021'},
+    {'type_id': 'PLtKJNVcMbjLSSYUwY9mFUmr99MTl5AAGu', 'type_name': '2020'},
+    {'type_id': 'PLtKJNVcMbjLQKBubz6HoKH3FWKeoh4qh_', 'type_name': '2019'},
+    {'type_id': 'PLtKJNVcMbjLTA82NlL3yi3cCKY63C10_-', 'type_name': '2018'},
+    {'type_id': 'PLtKJNVcMbjLT4EbtkW9OhjzxaNwTbKc55', 'type_name': '2017'},
+    {'type_id': 'PLtKJNVcMbjLSvBQe3cK-LHutsR8SG5dpN', 'type_name': '2016'},
+    {'type_id': 'PLtKJNVcMbjLTe8z2mBAU18X_I0JEy4GLQ', 'type_name': '2015'},
+    {'type_id': 'PLtKJNVcMbjLQvVzsDomQLWqE8-uKDYRoY', 'type_name': '2014'},    
+    {'type_id': 'PLtKJNVcMbjLRdCXW-QogELgq2CADSpIx5', 'type_name': '2013'},
+    {'type_id': 'PLtKJNVcMbjLS73iuYapCc-6ZW47qzNatD', 'type_name': '2012'},
+    {'type_id': 'PLtKJNVcMbjLQAfhPFHzJBazSjDYF7USoq', 'type_name': '2011'},
+    {'type_id': 'PLtKJNVcMbjLSOM_50dx3UDRChgIYjU6Ne', 'type_name': '2010'},
 ]
 # ====================================================================
 
