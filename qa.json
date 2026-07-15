@@ -1,5 +1,5 @@
 {
-    //"spider": "./tvbox.jar",
+    "spider": "./tvbox.jar",
     "logo": "https://img.freepik.com/free-vector/cute-dolphin-swimming-cartoon-vector-icon-illustration-animal-nature-icon-isolated-flat-vector_138676-12582.jpg?semt=ais_hybrid&w=740&q=80",
     "wallpaper":"http://tool.teyonds.com/api",
     "sites": [
