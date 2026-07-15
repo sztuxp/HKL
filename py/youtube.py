@@ -22,6 +22,12 @@ FIXED_CHANNELS = [
     {'vod_id': 'Ry--eMIjYLQ', 'vod_name': '鳳凰衛視'},
     {'vod_id': 'vr3XyVCR4T0', 'vod_name': '中天新聞'},
     {'vod_id': 'baDV1O5EBP0', 'vod_name': '中視新聞'},
+    {'vod_id': '6IquAgfvYmc', 'vod_name': '寰宇新聞'},
+    {'vod_id': 'm_dhMSvUCIc', 'vod_name': 'TVBS新聞'},
+    {'vod_id': '2mCSYvcfhtc', 'vod_name': 'TVBS-55台新聞'},
+    {'vod_id': 'GotlA1KKWoo', 'vod_name': 'CNN新聞'},
+    {'vod_id': 'q5qJELWgM38', 'vod_name': 'CBS新聞'},
+    {'vod_id': 'iipR5yUp36o', 'vod_name': 'ABC新聞'},
 ]
 
 # 分类也修改为更直观的固定分类
