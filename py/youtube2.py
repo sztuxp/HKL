@@ -16,18 +16,16 @@ sys.path.append('..')
 DEBUG_LOG = '/sdcard/Download/0712youtube_trace.log'
 
 # ==================== 在这里配置你固定的播放列表 ====================
-# 支持配置多个播放列表。
-# 播放列表 ID 可以从 YouTube 歌单/合集网址中的 list=PLxxxxxxx 提取
 FIXED_PLAYLISTS = [
     {
         'playlist_id': 'PLtKJNVcMbjLTtSL1IudnX_XS9ywElex_E', 
         'name': '非诚勿扰2025',
-        'pic': 'https://img.youtube.com/vi/default/hqdefault.jpg'
+        'pic': 'https://img.youtube.com/vi/QF1O46oKHDg/hqdefault.jpg'  # 使用了有效的默认封面图
     },
     {
         'playlist_id': 'PLtKJNVcMbjLTNWAq-P0vZt-Rm7JYpGQdq', 
         'name': '非诚勿扰2024',
-        'pic': 'https://img.youtube.com/vi/default/hqdefault.jpg'
+        'pic': 'https://img.youtube.com/vi/QF1O46oKHDg/hqdefault.jpg'
     },
 ]
 
@@ -747,17 +745,14 @@ class Spider(Spider):
         return result
 
     def homeVideoContent(self):
-        # 首页直接展示配置好的合集
         return self.categoryContent('fixed_playlists', 1, False, {})
 
     def categoryContent(self, cid, page, filter, ext):
-        # 原本是根据分类调用 _search_youtube_page
-        # 现在直接返回我们在顶部 FIXED_PLAYLISTS 里配好的固定合集
         videos = []
         for pl in FIXED_PLAYLISTS:
             pl_id = pl['playlist_id']
             videos.append({
-                'vod_id': f"PL_{pl_id}", # 拼接 PL_ 前缀进行唯一标识
+                'vod_id': f"PL_{pl_id}", 
                 'vod_name': pl['name'],
                 'vod_pic': pl['pic'],
                 'vod_remarks': '播放合集/Playlist',
@@ -771,27 +766,26 @@ class Spider(Spider):
         }
 
     def searchContent(self, key, quick, pg=1):
-        # 搜索功能也重定向回固定合集，完全限制操作
         return self.categoryContent('fixed_playlists', 1, False, {})
 
     def detailContent(self, did):
         raw_id = did[0]
         
-        # 【核心改动 1】：如果是点击了“合集”卡片 (以 PL_ 开头)
+        # 1. 详情页处理逻辑：如果点击的是合集 (PL_ 开头)
         if raw_id.startswith("PL_"):
             playlist_id = raw_id.replace("PL_", "")
             title, play_urls = self._get_playlist_videos(playlist_id)
             vod = {
                 'vod_id': raw_id,
                 'vod_name': title,
-                'vod_pic': 'https://img.youtube.com/vi/default/hqdefault.jpg',
+                'vod_pic': 'https://img.youtube.com/vi/QF1O46oKHDg/hqdefault.jpg',
                 'vod_remarks': '播放合集',
                 'vod_play_from': '合集分集列表',
-                'vod_play_url': '$$$'.join(play_urls) # 用 $$$ 拼接每一集，TVBox 侧会直接渲染出剧集列表
+                'vod_play_url': '$$$'.join(play_urls)
             }
             return {'list': [vod]}
 
-        # 【原版保留】：如果是单集视频播放，保持原汁原味的逻辑
+        # 2. 如果是正常的单个视频
         title = self._get_video_title(raw_id)
         safe_title = self._safe_title(title)
         play_sources = []
@@ -806,7 +800,7 @@ class Spider(Spider):
                 quality = 'hdr' if kind == 'HDR' else 'best'
                 play_sources.append(name)
                 play_urls.append(f'{safe_title} {name}${raw_id}@{quality}')
-            debug_log('detail dynamic sources', {'video_id': video_id, 'sources': play_sources})
+            debug_log('detail dynamic sources', {'video_id': raw_id, 'sources': play_sources})
         except Exception as e:
             debug_log('detail dynamic sources error', {'video_id': raw_id, 'error': repr(e)})
         if not play_sources:
@@ -824,16 +818,14 @@ class Spider(Spider):
         }
         return {'list': [vod]}
 
-def _get_playlist_videos(self, playlist_id):
-        """【增强版】：多层级解析 YouTube 播放列表页面，提取出每一个子视频的信息并拼装"""
+    def _get_playlist_videos(self, playlist_id):
+        """核心修复：深度遍历结合正则兜底，精确定位合集内视频"""
         playlist_url = f"https://www.youtube.com/playlist?list={playlist_id}"
         try:
             r = self.session.get(playlist_url, timeout=10)
             html_str = r.text
-            # 提取原网页中的关键 JSON 数据
             data = self.yt._extract_json_after(html_str, 'ytInitialData') or {}
             
-            # 1. 提取列表标题
             title = "YouTube 播放列表"
             try:
                 metadata = data.get('metadata', {}).get('playlistMetadataRenderer', {})
@@ -841,22 +833,18 @@ def _get_playlist_videos(self, playlist_id):
             except Exception:
                 pass
 
-            # 2. 遍历并过滤出合集中的所有子视频
             videos = []
-            seen_vids = set() # 避免重复添加视频
+            seen_vids = set()
             
             def scan_playlist(obj):
                 if isinstance(obj, dict):
-                    # 精准拦截各种可能包含视频 ID 的 Renderer 结构
                     if 'playlistVideoRenderer' in obj:
                         item = obj['playlistVideoRenderer']
                         v_id = item.get('videoId')
-                        # 如果 playlistVideoRenderer 里没直接拿到，尝试在 navigationEndpoint 拿
                         if not v_id:
                             nav = item.get('navigationEndpoint', {})
                             v_id = nav.get('watchEndpoint', {}).get('videoId')
                             
-                        # 提取标题
                         t_obj = item.get('title') or {}
                         v_title = t_obj.get('simpleText') or ''.join([x.get('text', '') for x in t_obj.get('runs', [])]) or 'Video'
                         
@@ -866,7 +854,6 @@ def _get_playlist_videos(self, playlist_id):
                             videos.append(f"{safe_v_title}${v_id}@best")
                             
                     elif 'gridVideoRenderer' in obj:
-                        # 兼容另一种列表渲染格式
                         item = obj['gridVideoRenderer']
                         v_id = item.get('videoId')
                         t_obj = item.get('title') or {}
@@ -884,16 +871,14 @@ def _get_playlist_videos(self, playlist_id):
 
             scan_playlist(data)
             
-            # 【后备备用方案】：如果深度遍历没抓到任何视频 ID，利用正则表达式从网页直接抓取视频 ID。
-            # 这能彻底防范 YouTube 数据结构变动导致的漏抓
+            # 正则强力兜底：如果 JSON 路径有变，直接通过正则将页面内的视频 ID 全部抽取出来
             if not videos:
                 debug_log("Warning: Depth scan failed, using regex fallback on playlist", {"id": playlist_id})
-                # 正则匹配形如 "videoId":"xxxxxxxxxxx" 的字符串
                 raw_matches = re.findall(r'"videoId"\s*:\s*"([0-9A-Za-z_-]{11})"', html_str)
-                for v_id in raw_matches:
+                for index, v_id in enumerate(raw_matches):
                     if v_id not in seen_vids:
                         seen_vids.add(v_id)
-                        videos.append(f"视频集数-{v_id}${v_id}@best")
+                        videos.append(f"第 {index+1} 集${v_id}@best")
 
             debug_log("parsed playlist videos", {"id": playlist_id, "count": len(videos)})
             if videos:
@@ -901,7 +886,7 @@ def _get_playlist_videos(self, playlist_id):
         except Exception as e:
             debug_log("get playlist videos error", repr(e))
         return "获取失败的播放列表", [f"解析列表失败$error@best"]
-    
+
     def _build_direct_play_url(self, media_url, headers, ext):
         header_query = urlencode({k: v for k, v in (headers or {}).items() if v})
         return f'{media_url}|{header_query}' if header_query else media_url
