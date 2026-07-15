@@ -32,7 +32,7 @@ FIXED_CHANNELS = [
 
 # 分类也修改为更直观的固定分类
 LIVE_CLASSES = [
-    {'type_id': 'fixed_live', 'type_name': '⭐ 固定的频道'},
+    {'type_id': 'fixed_live', 'type_name': '⭐ 新闻频道'},
 ]
 # ====================================================================
 
