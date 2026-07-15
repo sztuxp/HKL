@@ -16,7 +16,7 @@ sys.path.append('..')
 DEBUG_LOG = '/sdcard/Download/0712youtube_trace.log'
 
 # ==================== 在这里配置你固定的播放列表 ====================
-# 支持配置多个播放列表，在分类列表中会作为独立的虚拟视频（合集）展示
+# 支持配置多个播放列表。
 # 播放列表 ID 可以从 YouTube 歌单/合集网址中的 list=PLxxxxxxx 提取
 FIXED_PLAYLISTS = [
     {
@@ -31,7 +31,7 @@ FIXED_PLAYLISTS = [
     },
 ]
 
-# 分类精简为一个，即“我的歌单/播放列表”
+# 分类精简，只保留固定合集
 YOUTUBE_CLASSES = [
     {'type_id': 'fixed_playlists', 'type_name': '⭐ 固定播放列表'},
 ]
@@ -72,14 +72,17 @@ class YouTubeLite:
         watch_url = f"https://www.youtube.com/watch?v={video_id}"
         extract_started = time.time()
         debug_log('extract start', {'input': url_or_id, 'video_id': video_id})
+        watch_started = time.time()
         page_resp = self._get(watch_url)
         page = page_resp.text
+        debug_log('watch page', {'status': page_resp.status_code, 'length': len(page), 'cost_ms': int((time.time() - watch_started) * 1000)})
         ytcfg = self._extract_ytcfg(page) or {}
         player_response = self._extract_initial_player_response(page) or {}
         player_url = self._extract_player_url(page)
         api_key = ytcfg.get('INNERTUBE_API_KEY') or self._search(r'"INNERTUBE_API_KEY":"([^"]+)"', page)
         visitor_data = self._extract_visitor_data(ytcfg, player_response)
         sts = None
+        debug_log('page parsed', {'has_ytcfg': bool(ytcfg), 'has_initial_pr': bool(player_response), 'initial_status': (player_response.get('playabilityStatus') or {}).get('status'), 'initial_has_streaming': bool(player_response.get('streamingData')), 'has_api_key': bool(api_key), 'has_visitor': bool(visitor_data), 'sts': sts, 'player_url': player_url})
         context = ytcfg.get('INNERTUBE_CONTEXT') or {
             'client': {'clientName': 'WEB', 'clientVersion': '2.20240310.01.00', 'hl': 'en', 'gl': 'US'}
         }
@@ -89,6 +92,7 @@ class YouTubeLite:
             if not isinstance(api_responses, list):
                 api_responses = [api_responses] if api_responses else []
             responses.extend([x for x in api_responses if x])
+            debug_log('player api result', {'responses': len(api_responses), 'has_streaming': [bool((x or {}).get('streamingData')) for x in api_responses]})
         player_response = next((x for x in responses if (x.get('playabilityStatus') or {}).get('status') == 'OK'), player_response)
         status = (player_response.get('playabilityStatus') or {}).get('status')
         streaming = player_response.get('streamingData') or {}
@@ -98,9 +102,11 @@ class YouTubeLite:
         details = player_response.get('videoDetails') or {}
         raw_formats = []
         seen_raw = set()
+        source_counts = []
         for response in responses:
             response_streaming = (response or {}).get('streamingData') or {}
             source_raw = (response_streaming.get('formats') or []) + (response_streaming.get('adaptiveFormats') or [])
+            source_counts.append({'formats': len(response_streaming.get('formats') or []), 'adaptive': len(response_streaming.get('adaptiveFormats') or [])})
             for raw in source_raw:
                 key = (raw.get('itag'), raw.get('url') or raw.get('signatureCipher') or raw.get('cipher') or raw.get('mimeType'))
                 if key not in seen_raw:
@@ -109,11 +115,16 @@ class YouTubeLite:
                     raw['_client_name'] = (response or {}).get('_client_name')
                     raw['_client_ua'] = (response or {}).get('_client_ua')
                     raw_formats.append(raw)
+        debug_log('raw formats', {'sources': source_counts, 'total': len(raw_formats), 'sample_keys': sorted(list(raw_formats[0].keys())) if raw_formats else []})
         formats = []
+        cipher_count = 0
         for raw in raw_formats:
+            if raw.get('signatureCipher') or raw.get('cipher'):
+                cipher_count += 1
             item = self._normalize_format(raw, player_url)
             if item and item.get('url'):
                 formats.append(item)
+        debug_log('normalized formats', {'count': len(formats), 'cipher_count': cipher_count, 'progressive': len([x for x in formats if x.get('vcodec') != 'none' and x.get('acodec') != 'none'])})
         if not formats:
             raise Exception('未获取到可用播放地址')
         data = {
@@ -123,6 +134,7 @@ class YouTubeLite:
             'formats': formats,
         }
         self.extract_cache[video_id] = {'data': data, 'expires': time.time() + self.extract_cache_ttl}
+        debug_log('extract complete', {'video_id': video_id, 'cost_ms': int((time.time() - extract_started) * 1000), 'formats': len(formats)})
         return data
 
     @staticmethod
@@ -157,6 +169,23 @@ class YouTubeLite:
             or ((player_response.get('responseContext') or {}).get('visitorData'))
         )
 
+    def _extract_signature_timestamp(self, video_id, player_url, ytcfg=None):
+        try:
+            code = self._get_player_code(player_url)
+            sts = self._search(r'(?:signatureTimestamp|sts)\s*:\s*(\d{5})', code)
+            return int(sts) if sts else None
+        except Exception as e:
+            debug_log('sts extract error', repr(e))
+            return None
+
+    def _get_po_token(self, client_name, context='gvs'):
+        tokens = self.config.get('po_token') or self.config.get('po_tokens') or {}
+        if isinstance(tokens, str):
+            return tokens
+        if isinstance(tokens, dict):
+            return tokens.get(f'{client_name}.{context}') or tokens.get(client_name) or tokens.get(context)
+        return None
+
     def choose_playable(self, formats, quality=None):
         all_videos = [x for x in formats if x.get('vcodec') != 'none' and x.get('acodec') == 'none']
         candidates = all_videos[:]
@@ -181,7 +210,17 @@ class YouTubeLite:
             int(x.get('height') or 0),
             int(x.get('bitrate') or 0)
         ), reverse=True)
-        return candidates[0]
+        selected = candidates[0]
+        debug_log('video selected fast', {
+            'quality': quality,
+            'itag': selected.get('itag'),
+            'height': selected.get('height'),
+            'mime': selected.get('mimeType'),
+            'codec_priority': self._video_codec_priority(selected),
+            'candidates': len(candidates),
+            'probe_skipped': True,
+        })
+        return selected
 
     def _video_codec_priority(self, item):
         mime = (item.get('mimeType') or '').lower()
@@ -230,6 +269,7 @@ class YouTubeLite:
                 item['track_name'] = 'HDR' if self._is_hdr_video(item) else 'SDR'
                 item['is_hdr'] = self._is_hdr_video(item)
                 tracks.append(item)
+        debug_log('video tracks selected', [{'name': x.get('track_name'), 'itag': x.get('itag'), 'height': x.get('height'), 'codecs': x.get('codecs')} for x in tracks])
         return tracks
 
     def _is_hdr_video(self, item):
@@ -243,7 +283,48 @@ class YouTubeLite:
         if not candidates:
             return None
         candidates.sort(key=lambda x: (1 if x.get('ext') == 'mp4' else 0, int(x.get('bitrate') or 0)), reverse=True)
-        return candidates[0]
+        selected = candidates[0]
+        debug_log('audio selected fast', {
+            'itag': selected.get('itag'),
+            'mime': selected.get('mimeType'),
+            'bitrate': selected.get('bitrate'),
+            'probe_skipped': True,
+        })
+        return selected
+
+    def _probe_format(self, item):
+        try:
+            headers = self.headers.copy()
+            headers.update(item.get('headers') or {})
+            headers['Range'] = 'bytes=0-1'
+            r = self.session.get(item.get('url'), headers=headers, stream=True, timeout=10)
+            if r.url and r.url != item.get('url'):
+                item['url'] = r.url
+                item['redirected'] = True
+                debug_log('probe redirected url', self._url_summary(r.url))
+            status_code = r.status_code
+            r.close()
+            return status_code in (200, 206), status_code
+        except Exception as e:
+            return False, repr(e)
+
+    def choose_best_video_audio(self, formats):
+        videos = [x for x in formats if x.get('vcodec') != 'none' and x.get('acodec') == 'none']
+        audios = [x for x in formats if x.get('acodec') != 'none' and x.get('vcodec') == 'none']
+        videos.sort(key=lambda x: (int(x.get('height') or 0), int(x.get('bitrate') or 0)), reverse=True)
+        audios.sort(key=lambda x: int(x.get('bitrate') or 0), reverse=True)
+        return (videos[0] if videos else None), (audios[0] if audios else None)
+
+    def _url_summary(self, media_url):
+        parsed = urlparse(media_url or '')
+        query = parse_qs(parsed.query)
+        keys = ['itag', 'mime', 'c', 'expire', 'ip', 'mip', 'source', 'requiressl', 'gir', 'clen', 'dur', 'n', 'pot', 'sig', 'lsig', 'cms_redirect']
+        return {
+            'host': parsed.netloc,
+            'path': parsed.path,
+            'len': len(media_url or ''),
+            'params': {k: bool(query.get(k)) if k in ('pot', 'sig', 'lsig', 'cms_redirect') else (query.get(k, [''])[0][:80]) for k in keys if k in query}
+        }
 
     def _get(self, url, **kwargs):
         headers = self.headers.copy()
@@ -299,18 +380,23 @@ class YouTubeLite:
                 formats = streaming.get('formats') or []
                 adaptive = streaming.get('adaptiveFormats') or []
                 direct_video = [x for x in adaptive if (x.get('url') or x.get('signatureCipher') or x.get('cipher')) and str(x.get('mimeType') or '').startswith('video/')]
+                direct_any = [x for x in formats + adaptive if x.get('url') or x.get('signatureCipher') or x.get('cipher')]
                 has_streaming = bool(streaming)
+                debug_log('player api client', {'client': client_name, 'status': status, 'has_streaming': has_streaming, 'formats': len(formats), 'adaptive': len(adaptive), 'direct_any': len(direct_any), 'direct_video': len(direct_video)})
                 if has_streaming:
                     data['_client_name'] = client_name
                     data['_client_ua'] = client_ua
                     results.append(data)
+                    # VR 明文格式最完整，成功后立即返回，避免再串行请求 4 个客户端。
                     if client_name == 'ANDROID_VR' and direct_video:
+                        debug_log('player api fast return', {'client': client_name, 'direct_video': len(direct_video)})
                         return results
                 if has_streaming and fallback is None:
                     fallback = data
                 elif fallback is None:
                     fallback = data
-            except Exception:
+            except Exception as e:
+                debug_log('player api client error', {'client': client_name, 'error': repr(e)})
                 continue
         return results or ([fallback] if fallback else [])
 
@@ -366,6 +452,7 @@ class YouTubeLite:
             return ''
         if sig:
             decoded = self._decrypt_sig(sig, player_url)
+            debug_log('signature cipher', {'sp': sp, 'sig_len': len(sig), 'decoded_changed': decoded != sig, 'has_player': bool(player_url)})
             sep = '&' if '?' in media_url else '?'
             media_url = f'{media_url}{sep}{sp}={quote(decoded)}'
         return media_url
@@ -374,10 +461,12 @@ class YouTubeLite:
         cache_key = player_url or ''
         if cache_key in self.sig_plan_cache:
             plan = self.sig_plan_cache.get(cache_key)
+            debug_log('sig plan cache', {'has_plan': bool(plan), 'plan': plan[:8] if plan else None})
         else:
             code = self._get_player_code(player_url)
             plan = self._extract_sig_plan(code)
             self.sig_plan_cache[cache_key] = plan
+            debug_log('sig plan', {'code_len': len(code), 'has_plan': bool(plan), 'plan': plan[:8] if plan else None})
         if not plan:
             return sig
         arr = list(sig)
@@ -402,9 +491,12 @@ class YouTubeLite:
             if path_match and path_match.group(1) != n_value:
                 new_path = parsed.path.replace(f"/n/{path_match.group(1)}", f"/n/{n_value}", 1)
                 fixed = urlunparse(parsed._replace(path=new_path))
+                debug_log('n path synced', {'old': path_match.group(1), 'new_len': len(n_value), 'changed': fixed != media_url})
                 return fixed
+            debug_log('n present', {'n_len': len(n_value), 'has_path_n': bool(path_match)})
             return media_url
-        except Exception:
+        except Exception as e:
+            debug_log('n sync error', repr(e))
             return media_url
 
     def _get_player_code(self, player_url):
@@ -480,6 +572,42 @@ class YouTubeLite:
             elif 'a[0]' in body and 'length' in body:
                 result[method] = 'swap'
         return result
+
+    def _extract_n_function(self, code):
+        if not code:
+            return None
+        name = None
+        for pattern in [
+            r'\.get\("n"\)\)&&\(b=([a-zA-Z0-9_$]+)(?:\[(\d+)\])?\(b\)',
+            r'\.get\("n"\)\)&&\(b=([a-zA-Z0-9_$]+)\(b\)',
+            r'([a-zA-Z0-9_$]+)=function\(a\)\{var b=a\.split\(""\)',
+            r'function\s+([a-zA-Z0-9_$]+)\(a\)\{var b=a\.split\(""\)',
+            r'([a-zA-Z0-9_$]+)=function\(a\)\{a=a\.split\(""\)',
+        ]:
+            m = re.search(pattern, code)
+            if m:
+                name = m.group(1)
+                break
+        if not name:
+            return None
+        body = self._extract_js_function_body(code, name)
+        debug_log('n function', {'name': name, 'body_len': len(body)})
+        if not body:
+            return None
+
+        def transform(value):
+            arr = list(value)
+            for part in body.split(';'):
+                if 'reverse()' in part:
+                    arr.reverse()
+                m = re.search(r'\.slice\((\d+)\)', part)
+                if m:
+                    arr = arr[int(m.group(1)):]
+                m = re.search(r'\.splice\(0,(\d+)\)', part)
+                if m:
+                    arr = arr[int(m.group(1)):]
+            return ''.join(arr) or value
+        return transform
 
     def _extract_js_function_body(self, code, name):
         starts = []
@@ -584,15 +712,6 @@ class YouTubeLite:
         m = re.search(pattern, text or '', re.S)
         return m.group(1) if m else default
 
-    def _get_po_token(self, client_name, context='gvs'):
-        tokens = self.config.get('po_token') or self.config.get('po_tokens') or {}
-        if isinstance(tokens, str):
-            return tokens
-        if isinstance(tokens, dict):
-            return tokens.get(f'{client_name}.{context}') or tokens.get(client_name) or tokens.get(context)
-        return None
-
-
 class Spider(Spider):
     def getName(self):
         return 'YouTube视频'
@@ -628,43 +747,51 @@ class Spider(Spider):
         return result
 
     def homeVideoContent(self):
+        # 首页直接展示配置好的合集
         return self.categoryContent('fixed_playlists', 1, False, {})
 
     def categoryContent(self, cid, page, filter, ext):
-        # 首页/分类只加载配置好的播放列表“合集”
+        # 原本是根据分类调用 _search_youtube_page
+        # 现在直接返回我们在顶部 FIXED_PLAYLISTS 里配好的固定合集
         videos = []
         for pl in FIXED_PLAYLISTS:
             pl_id = pl['playlist_id']
             videos.append({
-                'vod_id': f"PL_{pl_id}", # 加上 PL_ 前缀进行标记
+                'vod_id': f"PL_{pl_id}", # 拼接 PL_ 前缀进行唯一标识
                 'vod_name': pl['name'],
                 'vod_pic': pl['pic'],
-                'vod_remarks': '播放列表/合集',
+                'vod_remarks': '播放合集/Playlist',
             })
-        return {'list': videos, 'page': 1, 'pagecount': 1, 'limit': len(videos), 'total': len(videos)}
+        return {
+            'list': videos, 
+            'page': 1, 
+            'pagecount': 1, 
+            'limit': len(videos), 
+            'total': len(videos)
+        }
 
     def searchContent(self, key, quick, pg=1):
-        # 搜索页也返回固定的播放列表合集
+        # 搜索功能也重定向回固定合集，完全限制操作
         return self.categoryContent('fixed_playlists', 1, False, {})
 
     def detailContent(self, did):
         raw_id = did[0]
         
-        # 1. 详情页处理逻辑：如果点击的是合集 (PL_ 开头)
+        # 【核心改动 1】：如果是点击了“合集”卡片 (以 PL_ 开头)
         if raw_id.startswith("PL_"):
             playlist_id = raw_id.replace("PL_", "")
             title, play_urls = self._get_playlist_videos(playlist_id)
             vod = {
                 'vod_id': raw_id,
                 'vod_name': title,
-                'vod_pic': f'https://img.youtube.com/vi/default/hqdefault.jpg',
-                'vod_remarks': '合集',
-                'vod_play_from': '合集列表',
-                'vod_play_url': '$$$'.join(play_urls)
+                'vod_pic': 'https://img.youtube.com/vi/default/hqdefault.jpg',
+                'vod_remarks': '播放合集',
+                'vod_play_from': '合集分集列表',
+                'vod_play_url': '$$$'.join(play_urls) # 用 $$$ 拼接每一集，TVBox 侧会直接渲染出剧集列表
             }
             return {'list': [vod]}
 
-        # 2. 如果是正常的单个视频
+        # 【原版保留】：如果是单集视频播放，保持原汁原味的逻辑
         title = self._get_video_title(raw_id)
         safe_title = self._safe_title(title)
         play_sources = []
@@ -679,8 +806,9 @@ class Spider(Spider):
                 quality = 'hdr' if kind == 'HDR' else 'best'
                 play_sources.append(name)
                 play_urls.append(f'{safe_title} {name}${raw_id}@{quality}')
-        except Exception:
-            pass
+            debug_log('detail dynamic sources', {'video_id': video_id, 'sources': play_sources})
+        except Exception as e:
+            debug_log('detail dynamic sources error', {'video_id': raw_id, 'error': repr(e)})
         if not play_sources:
             play_sources = ['SDR', 'HDR']
             play_urls = [
@@ -697,15 +825,15 @@ class Spider(Spider):
         return {'list': [vod]}
 
     def _get_playlist_videos(self, playlist_id):
-        """抓取 YouTube 网页并解析出 Playlist 内部所有的视频 ID 与标题"""
+        """【新增方法】：解析 YouTube 播放列表页面，提取出每一个子视频的信息并拼装"""
         playlist_url = f"https://www.youtube.com/playlist?list={playlist_id}"
         try:
             r = self.session.get(playlist_url, timeout=10)
             html_str = r.text
-            # 提取 initialData 包含了播放列表详情
+            # 提取原网页中的关键 JSON 数据
             data = self.yt._extract_json_after(html_str, 'ytInitialData') or {}
             
-            # 尝试提取播放列表标题
+            # 提取列表标题
             title = "YouTube 播放列表"
             try:
                 metadata = data.get('metadata', {}).get('playlistMetadataRenderer', {})
@@ -723,8 +851,8 @@ class Spider(Spider):
                         t_obj = item.get('title') or {}
                         v_title = t_obj.get('simpleText') or ''.join([x.get('text', '') for x in t_obj.get('runs', [])]) or 'Video'
                         if v_id:
-                            # 拼装成符合 TVBox 规范的播放串
                             safe_v_title = self._safe_title(v_title)
+                            # 包装成 TVBox 标准的 [集数名$播放ID] 格式，直接指定最高音视频质量 @best
                             videos.append(f"{safe_v_title}${v_id}@best")
                     for value in obj.values():
                         scan_playlist(value)
@@ -738,7 +866,11 @@ class Spider(Spider):
                 return title, videos
         except Exception as e:
             debug_log("get playlist videos error", repr(e))
-        return "获取失败的播放列表", [f"获取失败$error@best"]
+        return "获取失败的播放列表", [f"解析列表失败$error@best"]
+
+    def _build_direct_play_url(self, media_url, headers, ext):
+        header_query = urlencode({k: v for k, v in (headers or {}).items() if v})
+        return f'{media_url}|{header_query}' if header_query else media_url
 
     def playerContent(self, flag, pid, vipFlags):
         raw_pid = pid.split('$')[-1]
@@ -758,6 +890,7 @@ class Spider(Spider):
                 video_tracks = [all_tracks[0]]
             if video_tracks:
                 audio = self.yt.choose_audio(data['formats'])
+                debug_log('selected track', {'requested': wanted_name, 'track': {'name': video_tracks[0].get('track_name'), 'itag': video_tracks[0].get('itag'), 'height': video_tracks[0].get('height'), 'mime': video_tracks[0].get('mimeType')}, 'audio': audio.get('itag') if audio else None})
                 if audio:
                     cache_key = f'yt_{video_id}_{quality}'
                     self.setCache(cache_key, {
@@ -777,6 +910,7 @@ class Spider(Spider):
             raise Exception(f'没有可直接播放的 {quality} 视频流格式')
         except Exception as e:
             debug_log('playerContent error', repr(e))
+            print(f'[YouTubeLite] 解析失败: {e}')
             res = {'parse': 1, 'url': f'https://www.youtube.com/embed/{video_id}?autoplay=1', 'header': json.dumps(self.header)}
             if self.proxy_str:
                 res['proxy'] = self.proxy_str
@@ -789,7 +923,40 @@ class Spider(Spider):
             return self._proxy_mpd(params)
         if params.get('type') == 'media':
             return self._proxy_media(params)
+        if params.get('type') == 'single':
+            return self._proxy_single(params)
         return None
+
+    def _proxy_single(self, params):
+        vid = params.get('vid')
+        debug_log('proxy single request', {'vid': vid, 'range': params.get('range'), 'keys': sorted(list(params.keys()))[:20]})
+        data = self.getCache(f'yt_single_{vid}') if vid else None
+        if not data:
+            return [404, 'text/plain', '播放缓存已过期或不存在']
+        target_url = data.get('url')
+        if not target_url:
+            return [404, 'text/plain', '播放地址不存在']
+        headers = (data.get('headers') or self.header).copy()
+        range_header = params.get('range') or params.get('Range')
+        if range_header:
+            headers['Range'] = range_header
+        try:
+            r = self.session.get(target_url, headers=headers, stream=True, timeout=30)
+            debug_log('proxy single response', {'status': r.status_code, 'content_type': r.headers.get('content-type'), 'content_length': r.headers.get('content-length'), 'content_range': r.headers.get('content-range')})
+            content_type = r.headers.get('content-type', 'video/mp4')
+            resp_headers = {
+                'Content-Type': content_type,
+                'Accept-Ranges': 'bytes',
+                'Cache-Control': 'no-cache',
+            }
+            if r.headers.get('content-range'):
+                resp_headers['Content-Range'] = r.headers.get('content-range')
+            if r.headers.get('content-length'):
+                resp_headers['Content-Length'] = r.headers.get('content-length')
+            return [r.status_code, content_type, r.content, resp_headers]
+        except Exception as e:
+            debug_log('proxy single error', repr(e))
+            return [500, 'text/plain', f'代理播放失败: {str(e)}']
 
     def _proxy_mpd(self, params):
         vid = params.get('vid')
@@ -811,6 +978,7 @@ class Spider(Spider):
         for item in video_tracks:
             init_range = item.get('initRange') or {}
             index_range = item.get('indexRange') or {}
+            name = item.get('track_name') or ('HDR' if item.get('is_hdr') else 'SDR')
             base_url = item.get('url') if direct_segments else media_base + f"&track=video&itag={item.get('itag')}"
             mpd += f'''    <AdaptationSet mimeType="{html.escape((item.get('mimeType') or 'video/webm').split(';')[0])}" startWithSAP="1" segmentAlignment="true" scanType="progressive">
       <Representation id="v{item.get('itag', 1)}" bandwidth="{item.get('bitrate', 1000000)}" codecs="{html.escape(item.get('codecs') or '')}" height="{item.get('height', 0)}" width="{item.get('width', 0)}">
@@ -831,6 +999,7 @@ class Spider(Spider):
     </AdaptationSet>
 '''
         mpd += '  </Period>\n</MPD>'
+        debug_log('proxy mpd tracks', {'vid': vid, 'quality': quality, 'tracks': [{'name': x.get('track_name'), 'itag': x.get('itag')} for x in video_tracks], 'audio': audio_item.get('itag'), 'direct': direct_segments, 'duration': duration_pt})
         return [200, 'application/dash+xml', mpd]
 
     def _proxy_media(self, params):
@@ -858,6 +1027,7 @@ class Spider(Spider):
         try:
             r = self.session.get(target_url, headers=headers, stream=True, timeout=30)
             content_type = r.headers.get('content-type', 'application/octet-stream')
+            debug_log('proxy media response', {'track': track, 'itag': media_item.get('itag'), 'track_name': media_item.get('track_name'), 'status': r.status_code, 'range': range_header, 'content_type': content_type, 'content_length': r.headers.get('content-length'), 'content_range': r.headers.get('content-range')})
             resp_headers = {'Content-Type': content_type, 'Accept-Ranges': 'bytes', 'Cache-Control': 'no-cache'}
             if r.headers.get('content-range'):
                 resp_headers['Content-Range'] = r.headers.get('content-range')
@@ -866,6 +1036,33 @@ class Spider(Spider):
             return [r.status_code, content_type, r.content, resp_headers]
         except Exception as e:
             return [500, 'text/plain', f'代理媒体失败: {str(e)}']
+
+    def _normalize_category_id(self, cid):
+        return cid
+
+    def _normalize_filter_term(self, value):
+        return ""
+
+    def _build_category_keyword(self, cid, filters=None):
+        return ""
+
+    def _search_cache_key(self, key):
+        return re.sub(r'\s+', ' ', str(key or '')).strip().lower()
+
+    def _search_youtube(self, key):
+        return []
+
+    def _search_youtube_page(self, key, page=1):
+        return [], False
+
+    def _extract_videos_fixed(self, html_str, limit=30):
+        return []
+
+    def _extract_videos_from_api(self, data, limit=30):
+        return []
+
+    def _parse_renderer(self, renderer):
+        return None
 
     def _get_video_title(self, vid):
         try:
@@ -878,6 +1075,19 @@ class Spider(Spider):
         if not title:
             return 'video'
         return re.sub(r'[#$@%&!?*|\\/:<>]', ' ', title)[:60]
+
+    def _seconds_to_iso_duration(self, seconds):
+        seconds = float(seconds or 0)
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        secs = seconds - hours * 3600 - minutes * 60
+        parts = []
+        if hours:
+            parts.append(f'{hours}H')
+        if minutes:
+            parts.append(f'{minutes}M')
+        parts.append(f'{secs:.3f}S')
+        return 'PT' + ''.join(parts)
 
     def destroy(self):
         try:
