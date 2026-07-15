@@ -824,8 +824,8 @@ class Spider(Spider):
         }
         return {'list': [vod]}
 
-    def _get_playlist_videos(self, playlist_id):
-        """【新增方法】：解析 YouTube 播放列表页面，提取出每一个子视频的信息并拼装"""
+def _get_playlist_videos(self, playlist_id):
+        """【增强版】：多层级解析 YouTube 播放列表页面，提取出每一个子视频的信息并拼装"""
         playlist_url = f"https://www.youtube.com/playlist?list={playlist_id}"
         try:
             r = self.session.get(playlist_url, timeout=10)
@@ -833,7 +833,7 @@ class Spider(Spider):
             # 提取原网页中的关键 JSON 数据
             data = self.yt._extract_json_after(html_str, 'ytInitialData') or {}
             
-            # 提取列表标题
+            # 1. 提取列表标题
             title = "YouTube 播放列表"
             try:
                 metadata = data.get('metadata', {}).get('playlistMetadataRenderer', {})
@@ -841,19 +841,41 @@ class Spider(Spider):
             except Exception:
                 pass
 
-            # 遍历并过滤出合集中的所有子视频
+            # 2. 遍历并过滤出合集中的所有子视频
             videos = []
+            seen_vids = set() # 避免重复添加视频
+            
             def scan_playlist(obj):
                 if isinstance(obj, dict):
+                    # 精准拦截各种可能包含视频 ID 的 Renderer 结构
                     if 'playlistVideoRenderer' in obj:
                         item = obj['playlistVideoRenderer']
                         v_id = item.get('videoId')
+                        # 如果 playlistVideoRenderer 里没直接拿到，尝试在 navigationEndpoint 拿
+                        if not v_id:
+                            nav = item.get('navigationEndpoint', {})
+                            v_id = nav.get('watchEndpoint', {}).get('videoId')
+                            
+                        # 提取标题
                         t_obj = item.get('title') or {}
                         v_title = t_obj.get('simpleText') or ''.join([x.get('text', '') for x in t_obj.get('runs', [])]) or 'Video'
-                        if v_id:
+                        
+                        if v_id and len(v_id) == 11 and v_id not in seen_vids:
+                            seen_vids.add(v_id)
                             safe_v_title = self._safe_title(v_title)
-                            # 包装成 TVBox 标准的 [集数名$播放ID] 格式，直接指定最高音视频质量 @best
                             videos.append(f"{safe_v_title}${v_id}@best")
+                            
+                    elif 'gridVideoRenderer' in obj:
+                        # 兼容另一种列表渲染格式
+                        item = obj['gridVideoRenderer']
+                        v_id = item.get('videoId')
+                        t_obj = item.get('title') or {}
+                        v_title = t_obj.get('simpleText') or ''.join([x.get('text', '') for x in t_obj.get('runs', [])]) or 'Video'
+                        if v_id and len(v_id) == 11 and v_id not in seen_vids:
+                            seen_vids.add(v_id)
+                            safe_v_title = self._safe_title(v_title)
+                            videos.append(f"{safe_v_title}${v_id}@best")
+
                     for value in obj.values():
                         scan_playlist(value)
                 elif isinstance(obj, list):
@@ -861,13 +883,25 @@ class Spider(Spider):
                         scan_playlist(value)
 
             scan_playlist(data)
+            
+            # 【后备备用方案】：如果深度遍历没抓到任何视频 ID，利用正则表达式从网页直接抓取视频 ID。
+            # 这能彻底防范 YouTube 数据结构变动导致的漏抓
+            if not videos:
+                debug_log("Warning: Depth scan failed, using regex fallback on playlist", {"id": playlist_id})
+                # 正则匹配形如 "videoId":"xxxxxxxxxxx" 的字符串
+                raw_matches = re.findall(r'"videoId"\s*:\s*"([0-9A-Za-z_-]{11})"', html_str)
+                for v_id in raw_matches:
+                    if v_id not in seen_vids:
+                        seen_vids.add(v_id)
+                        videos.append(f"视频集数-{v_id}${v_id}@best")
+
             debug_log("parsed playlist videos", {"id": playlist_id, "count": len(videos)})
             if videos:
                 return title, videos
         except Exception as e:
             debug_log("get playlist videos error", repr(e))
         return "获取失败的播放列表", [f"解析列表失败$error@best"]
-
+    
     def _build_direct_play_url(self, media_url, headers, ext):
         header_query = urlencode({k: v for k, v in (headers or {}).items() if v})
         return f'{media_url}|{header_query}' if header_query else media_url
