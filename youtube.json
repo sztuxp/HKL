@@ -5,13 +5,13 @@
     "sites": [
 		{
             "key":"youtube2",
-            "name":"🐬油管,py[其他]",
+            "name":"非诚勿扰",
 			"type": 3,
 			"api": "https://ghfast.top/https://raw.githubusercontent.com/sztuxp/HKL/refs/heads/main/py/youtube2.py"
 		},	
    		{
             "key":"youtube3",
-            "name":"🐬油管直播,py",
+            "name":"新闻直播",
 			"type": 3,
 			"api": "https://ghfast.top/https://raw.githubusercontent.com/sztuxp/HKL/refs/heads/main/py/youtube.py"
 		}
