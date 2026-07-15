@@ -3,12 +3,7 @@
     "wallpaper": "http://127.0.0.1:9978/proxy?do=wallpaper",
     "logo": "https://img.freepik.com/free-vector/cute-dolphin-swimming-cartoon-vector-icon-illustration-animal-nature-icon-isolated-flat-vector_138676-12582.jpg?semt=ais_hybrid&w=740&q=80",
     "sites": [
-   		{
-            "key":"youtube3",
-            "name":"新闻直播",
-			"type": 3,
-			"api": "https://ghfast.top/https://raw.githubusercontent.com/sztuxp/HKL/refs/heads/main/py/youtube.py"
-		}
+
     ],
     "lives": [
     ],
