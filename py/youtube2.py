@@ -15,26 +15,14 @@ sys.path.append('..')
 
 DEBUG_LOG = '/sdcard/Download/0712youtube_trace.log'
 
-# ==================== 在这里配置你固定的播放列表 ====================
-FIXED_PLAYLISTS = [
-    {
-        'playlist_id': 'PLtKJNVcMbjLTtSL1IudnX_XS9ywElex_E', 
-        'name': '非诚勿扰2025',
-        'pic': 'https://img.youtube.com/vi/QF1O46oKHDg/hqdefault.jpg'  # 使用了有效的默认封面图
-    },
-    {
-        'playlist_id': 'PLtKJNVcMbjLTNWAq-P0vZt-Rm7JYpGQdq', 
-        'name': '非诚勿扰2024',
-        'pic': 'https://img.youtube.com/vi/QF1O46oKHDg/hqdefault.jpg'
-    },
-]
-
-# 分类精简，只保留固定合集
+# ==================== 在这里配置你固定的播放列表（对应为大类分类） ====================
+# type_id 填写播放列表的 playlist_id (即 list= 后面的参数)
+# type_name 填写你想要显示的分类名称
 YOUTUBE_CLASSES = [
-    {'type_id': 'fixed_playlists', 'type_name': '⭐ 固定播放列表'},
+    {'type_id': 'PLtKJNVcMbjLTtSL1IudnX_XS9ywElex_E', 'type_name': '非诚勿扰2025'},
+    {'type_id': 'PLtKJNVcMbjLTNWAq-P0vZt-Rm7JYpGQdq', 'type_name': '非诚勿扰2024'},
 ]
 # ====================================================================
-
 
 def debug_log(message, data=None):
     try:
@@ -741,102 +729,29 @@ class Spider(Spider):
         self.search_page_cache = {}
 
     def homeContent(self, filter):
+        # 1. 过滤大类，直接加载我们写死的播放列表名称作为主分类
         result = {'class': YOUTUBE_CLASSES}
         return result
 
     def homeVideoContent(self):
-        return self.categoryContent('fixed_playlists', 1, False, {})
+        # 默认推荐直接展示第一个播放列表下的视频
+        if YOUTUBE_CLASSES:
+            return self.categoryContent(YOUTUBE_CLASSES[0]['type_id'], 1, False, {})
+        return {'list': []}
 
     def categoryContent(self, cid, page, filter, ext):
+        """核心改动：点击分类大类（即播放列表）时，直接解析该播放列表下的所有视频，并平铺展示出来"""
+        playlist_id = str(cid or '').strip()
         videos = []
-        for pl in FIXED_PLAYLISTS:
-            pl_id = pl['playlist_id']
-            videos.append({
-                'vod_id': f"PL_{pl_id}", 
-                'vod_name': pl['name'],
-                'vod_pic': pl['pic'],
-                'vod_remarks': '播放合集/Playlist',
-            })
-        return {
-            'list': videos, 
-            'page': 1, 
-            'pagecount': 1, 
-            'limit': len(videos), 
-            'total': len(videos)
-        }
-
-    def searchContent(self, key, quick, pg=1):
-        return self.categoryContent('fixed_playlists', 1, False, {})
-
-    def detailContent(self, did):
-        raw_id = did[0]
+        seen_vids = set()
         
-        # 1. 详情页处理逻辑：如果点击的是合集 (PL_ 开头)
-        if raw_id.startswith("PL_"):
-            playlist_id = raw_id.replace("PL_", "")
-            title, play_urls = self._get_playlist_videos(playlist_id)
-            vod = {
-                'vod_id': raw_id,
-                'vod_name': title,
-                'vod_pic': 'https://img.youtube.com/vi/QF1O46oKHDg/hqdefault.jpg',
-                'vod_remarks': '播放合集',
-                'vod_play_from': '合集分集列表',
-                'vod_play_url': '$$$'.join(play_urls)
-            }
-            return {'list': [vod]}
-
-        # 2. 如果是正常的单个视频
-        title = self._get_video_title(raw_id)
-        safe_title = self._safe_title(title)
-        play_sources = []
-        play_urls = []
-        try:
-            data = self.yt.extract(raw_id)
-            tracks = self.yt.choose_video_tracks(data.get('formats') or [], 'best')
-            for track in tracks:
-                height = int(track.get('height') or 0)
-                kind = track.get('track_name') or ('HDR' if track.get('is_hdr') else 'SDR')
-                name = f'{height}p {kind}' if height else kind
-                quality = 'hdr' if kind == 'HDR' else 'best'
-                play_sources.append(name)
-                play_urls.append(f'{safe_title} {name}${raw_id}@{quality}')
-            debug_log('detail dynamic sources', {'video_id': raw_id, 'sources': play_sources})
-        except Exception as e:
-            debug_log('detail dynamic sources error', {'video_id': raw_id, 'error': repr(e)})
-        if not play_sources:
-            play_sources = ['SDR', 'HDR']
-            play_urls = [
-                f'{safe_title} SDR${raw_id}@best',
-                f'{safe_title} HDR${raw_id}@hdr',
-            ]
-        vod = {
-            'vod_id': raw_id,
-            'vod_name': title,
-            'vod_pic': f'https://img.youtube.com/vi/{raw_id}/hqdefault.jpg',
-            'vod_play_from': '$$$'.join(play_sources),
-            'vod_play_url': '$$$'.join(play_urls)
-        }
-        return {'list': [vod]}
-
-    def _get_playlist_videos(self, playlist_id):
-        """增强版（第821行）：绕过 YouTube 页面懒加载限制，通过 JSON 遍历 + 正则全局检索双重机制提取全部视频"""
         playlist_url = f"https://www.youtube.com/playlist?list={playlist_id}"
         try:
             r = self.session.get(playlist_url, timeout=10)
             html_str = r.text
             data = self.yt._extract_json_after(html_str, 'ytInitialData') or {}
             
-            title = "YouTube 播放列表"
-            try:
-                metadata = data.get('metadata', {}).get('playlistMetadataRenderer', {})
-                title = metadata.get('title') or title
-            except Exception:
-                pass
-
-            videos = []
-            seen_vids = set()
-            
-            # 1. 优先采用深度遍历扫描首屏渲染好的 JSON
+            # 优先从首屏 JSON 数据中递归扫描所有的视频条目
             def scan_playlist(obj):
                 if isinstance(obj, dict):
                     if 'playlistVideoRenderer' in obj:
@@ -851,8 +766,12 @@ class Spider(Spider):
                         
                         if v_id and len(v_id) == 11 and v_id not in seen_vids:
                             seen_vids.add(v_id)
-                            safe_v_title = self._safe_title(v_title)
-                            videos.append(f"{safe_v_title}${v_id}@best")
+                            videos.append({
+                                'vod_id': v_id,
+                                'vod_name': html.unescape(v_title),
+                                'vod_pic': f'https://img.youtube.com/vi/{v_id}/hqdefault.jpg',
+                                'vod_remarks': '播放',
+                            })
                             
                     elif 'gridVideoRenderer' in obj:
                         item = obj['gridVideoRenderer']
@@ -861,8 +780,12 @@ class Spider(Spider):
                         v_title = t_obj.get('simpleText') or ''.join([x.get('text', '') for x in t_obj.get('runs', [])]) or 'Video'
                         if v_id and len(v_id) == 11 and v_id not in seen_vids:
                             seen_vids.add(v_id)
-                            safe_v_title = self._safe_title(v_title)
-                            videos.append(f"{safe_v_title}${v_id}@best")
+                            videos.append({
+                                'vod_id': v_id,
+                                'vod_name': html.unescape(v_title),
+                                'vod_pic': f'https://img.youtube.com/vi/{v_id}/hqdefault.jpg',
+                                'vod_remarks': '播放',
+                            })
 
                     for value in obj.values():
                         scan_playlist(value)
@@ -872,28 +795,75 @@ class Spider(Spider):
 
             scan_playlist(data)
             
-            # 2. 核心突破：利用正则全局检索未渲染但存在于底层数据缓存里的视频 ID
-            # 排除掉常见的 YouTube 静态资源和预留非视频字符
+            # 正则强力突破懒加载限制：直接通过正则将页面缓存的所有视频 ID 提取出来追加
             blacklist_ids = {'default', 'hqdefault', 'mqdefault', 'sddefault', 'maxresdefa'}
-            
-            # 匹配包含在 watch?v= 以及 JSON 串内部所有的 11 位视频 ID
             raw_matches = re.findall(r'/watch\?v=([0-9A-Za-z_-]{11})', html_str)
             raw_matches += re.findall(r'"videoId"\s*:\s*"([0-9A-Za-z_-]{11})"', html_str)
             
-            # 整理并追加去重
             match_index = len(videos) + 1
             for v_id in raw_matches:
                 if v_id and v_id not in seen_vids and v_id not in blacklist_ids:
                     seen_vids.add(v_id)
-                    videos.append(f"第 {match_index} 集-${v_id}@best")
+                    videos.append({
+                        'vod_id': v_id,
+                        'vod_name': f"集数-第 {match_index} 期视频",
+                        'vod_pic': f'https://img.youtube.com/vi/{v_id}/hqdefault.jpg',
+                        'vod_remarks': '播放',
+                    })
                     match_index += 1
 
-            debug_log("parsed playlist videos", {"id": playlist_id, "count": len(videos)})
-            if videos:
-                return title, videos
+            debug_log("parsed category playlist videos", {"id": playlist_id, "count": len(videos)})
         except Exception as e:
-            debug_log("get playlist videos error", repr(e))
-        return "获取失败的播放列表", [f"解析列表失败$error@best"]
+            debug_log("category playlist parse error", repr(e))
+
+        return {
+            'list': videos, 
+            'page': 1, 
+            'pagecount': 1, 
+            'limit': len(videos), 
+            'total': len(videos)
+        }
+
+    def searchContent(self, key, quick, pg=1):
+        # 搜索框默认锁定，直接返回第一个列表内容防止报错
+        if YOUTUBE_CLASSES:
+            return self.categoryContent(YOUTUBE_CLASSES[0]['type_id'], 1, False, {})
+        return {'list': []}
+
+    def detailContent(self, did):
+        # 点击视频卡片后，由于已经是单个视频，走原版的提取逻辑
+        video_id = did[0]
+        title = self._get_video_title(video_id)
+        safe_title = self._safe_title(title)
+        play_sources = []
+        play_urls = []
+        try:
+            data = self.yt.extract(video_id)
+            tracks = self.yt.choose_video_tracks(data.get('formats') or [], 'best')
+            for track in tracks:
+                height = int(track.get('height') or 0)
+                kind = track.get('track_name') or ('HDR' if track.get('is_hdr') else 'SDR')
+                name = f'{height}p {kind}' if height else kind
+                quality = 'hdr' if kind == 'HDR' else 'best'
+                play_sources.append(name)
+                play_urls.append(f'{safe_title} {name}${video_id}@{quality}')
+            debug_log('detail dynamic sources', {'video_id': video_id, 'sources': play_sources})
+        except Exception as e:
+            debug_log('detail dynamic sources error', {'video_id': video_id, 'error': repr(e)})
+        if not play_sources:
+            play_sources = ['SDR', 'HDR']
+            play_urls = [
+                f'{safe_title} SDR${video_id}@best',
+                f'{safe_title} HDR${video_id}@hdr',
+            ]
+        vod = {
+            'vod_id': video_id,
+            'vod_name': title,
+            'vod_pic': f'https://img.youtube.com/vi/{video_id}/hqdefault.jpg',
+            'vod_play_from': '$$$'.join(play_sources),
+            'vod_play_url': '$$$'.join(play_urls)
+        }
+        return {'list': [vod]}
 
     def _build_direct_play_url(self, media_url, headers, ext):
         header_query = urlencode({k: v for k, v in (headers or {}).items() if v})
