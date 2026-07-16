@@ -8,7 +8,7 @@
 OK影视软件下载:
 https://hyhy65.lanzoui.com/b0hdjcd1g
 
-需要多资源进电报群：https://t.me/hshsjk9
+
 
 免责声明：
 本仓库或本仓库相关的仓库, 以下简称为本仓库
