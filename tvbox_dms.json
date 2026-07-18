@@ -1,0 +1,20 @@
+{
+  "spider": "./tvbox_spider.jar", 
+  "slogan": "",
+  "logo": "https://wallpapers.gaoops.top/gif",
+  "hosts": [
+    "img1.wsyzy.org=danmu.888484.xyz",
+    "fiizvfck.top=danmu.888484.xyz"
+  ],
+  "sites": [
+   		{
+            "key":"youtube3",
+            "name":"新闻直播",
+			"type": 3,
+			"api": "https://ghfast.top/https://raw.githubusercontent.com/sztuxp/HKL/refs/heads/main/py/youtube.py"
+		}
+  ],
+  "lives": [
+ 
+  ]
+}
