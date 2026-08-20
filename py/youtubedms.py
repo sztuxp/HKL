@@ -1,0 +1,609 @@
+#coding=utf-8
+#!/usr/bin/python
+import re
+import sys
+import json
+import html
+import time
+from urllib.parse import quote, unquote, urljoin
+
+import requests
+from base.spider import Spider
+
+sys.path.append('..')
+
+DEBUG_LOG = '/sdcard/Download/ytblive_debug.log'
+
+# ==================== 在这里配置你固定的直播频道 ====================
+# 支持两种配置方式：
+# 1. 固定的视频 ID （最推荐，点开即播。例如下面的 QF1O46oKHDg）
+# 2. 频道的主页 ID （会动态获取该频道当前正在直播的视频，如果没有直播则播放最新视频）
+FIXED_CHANNELS = [
+    {'vod_id': 'Ry--eMIjYLQ', 'vod_name': '鳳凰衛視'},
+    {'vod_id': 'vr3XyVCR4T0', 'vod_name': '中天新聞'},
+    {'vod_id': 'baDV1O5EBP0', 'vod_name': '中視新聞'},
+    {'vod_id': '6IquAgfvYmc', 'vod_name': '寰宇新聞'},
+    {'vod_id': 'm_dhMSvUCIc', 'vod_name': 'TVBS新聞'},
+    {'vod_id': '2mCSYvcfhtc', 'vod_name': 'TVBS-55台新聞'},
+    {'vod_id': 'GotlA1KKWoo', 'vod_name': 'CNN新聞'},
+    {'vod_id': 'q5qJELWgM38', 'vod_name': 'CBS新聞'},
+    {'vod_id': 'iipR5yUp36o', 'vod_name': 'ABC新聞'},
+]
+
+# 分类也修改为更直观的固定分类
+LIVE_CLASSES = [
+    {'type_id': 'fixed_live', 'type_name': '⭐ 新闻频道'},
+]
+# ====================================================================
+
+
+def debug_log(message, data=None):
+    try:
+        line = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {message}"
+        if data is not None:
+            if isinstance(data, (dict, list)):
+                line += ' ' + json.dumps(data, ensure_ascii=False, default=str)
+            else:
+                line += ' ' + str(data)
+        with open(DEBUG_LOG, 'a', encoding='utf-8') as f:
+            f.write(line + '\n')
+    except Exception:
+        pass
+
+
+class YouTubeLiveLite:
+    def __init__(self, session, headers=None, config=None):
+        self.session = session
+        self.headers = headers or {}
+        self.config = config or {}
+        self.cache = {}
+        self.cache_ttl = int(self.config.get('live_cache_ttl') or 45)
+
+    @staticmethod
+    def extract_video_id(text):
+        text = str(text or '').strip()
+        for pattern in [
+            r'(?:v=|/v/|/embed/|/shorts/|youtu\.be/)([0-9A-Za-z_-]{11})',
+            r'^([0-9A-Za-z_-]{11})$',
+        ]:
+            match = re.search(pattern, text)
+            if match:
+                return match.group(1)
+        raise Exception('无法识别 YouTube 视频 ID')
+
+    def extract_live(self, url_or_id):
+        # 如果传入的是频道 ID (UC开头的24位)，先尝试解析出该频道当前正在直播的视频 ID
+        if url_or_id.startswith('UC') and len(url_or_id) == 24:
+            url_or_id = self.resolve_channel_live(url_or_id)
+
+        video_id = self.extract_video_id(url_or_id)
+        now = time.time()
+        cached = self.cache.get(video_id)
+        if cached and cached.get('expires', 0) > now:
+            debug_log('live cache hit', {'video_id': video_id, 'ttl': int(cached.get('expires', 0) - now)})
+            return cached.get('data')
+
+        watch_url = f'https://www.youtube.com/watch?v={video_id}'
+        debug_log('live extract start', {'input': url_or_id, 'video_id': video_id})
+        response = self._get(watch_url)
+        page = response.text
+        player_response = self._extract_initial_player_response(page) or {}
+        ytcfg = self._extract_ytcfg(page) or {}
+        api_key = ytcfg.get('INNERTUBE_API_KEY') or self._search(r'"INNERTUBE_API_KEY":"([^"]+)"', page)
+        visitor_data = self._extract_visitor_data(ytcfg, player_response)
+        status_obj = player_response.get('playabilityStatus') or {}
+        streaming = player_response.get('streamingData') or {}
+        details = player_response.get('videoDetails') or {}
+
+        debug_log('live page parsed', {
+            'status': status_obj.get('status'),
+            'reason': status_obj.get('reason'),
+            'is_live': details.get('isLiveContent'),
+            'has_hls': bool(streaming.get('hlsManifestUrl')),
+            'has_api_key': bool(api_key),
+            'has_visitor': bool(visitor_data),
+        })
+
+        page_hls_url = streaming.get('hlsManifestUrl') or ''
+        hls_source = 'page' if page_hls_url else ''
+        api_data = None
+        if api_key:
+            api_data = self._call_player_api(video_id, api_key, ytcfg, watch_url, visitor_data)
+            if api_data:
+                api_streaming = api_data.get('streamingData') or {}
+                api_details = api_data.get('videoDetails') or {}
+                api_hls_url = api_streaming.get('hlsManifestUrl') or ''
+                if api_hls_url:
+                    streaming = api_streaming
+                    hls_source = api_data.get('_client_name') or 'api'
+                elif not page_hls_url and api_streaming:
+                    streaming = api_streaming
+                    hls_source = api_data.get('_client_name') or 'api_no_hls'
+                if api_details:
+                    details = api_details
+                status_obj = api_data.get('playabilityStatus') or status_obj
+        if not (streaming.get('hlsManifestUrl') or '') and page_hls_url:
+            streaming = dict(streaming or {})
+            streaming['hlsManifestUrl'] = page_hls_url
+            hls_source = 'page_fallback'
+
+        hls_url = streaming.get('hlsManifestUrl') or ''
+        is_live = bool(details.get('isLiveContent') or hls_url)
+        status = status_obj.get('status') or ''
+        reason = status_obj.get('reason') or ''
+        title = details.get('title') or video_id
+
+        data = {
+            'id': video_id,
+            'title': title,
+            'is_live': is_live,
+            'status': status,
+            'reason': reason,
+            'hls_url': hls_url,
+            'duration': int(details.get('lengthSeconds') or 0),
+        }
+        debug_log('live extract result', {
+            'video_id': video_id,
+            'status': status,
+            'is_live': is_live,
+            'has_hls': bool(hls_url),
+            'hls_source': hls_source,
+            'duration': data.get('duration'),
+        })
+        self.cache[video_id] = {'data': data, 'expires': time.time() + self.cache_ttl}
+        return data
+
+    def resolve_channel_live(self, channel_id):
+        """如果配置了频道ID，通过请求频道直播页面动态解析其当前直播的视频ID"""
+        try:
+            url = f'https://www.youtube.com/channel/{channel_id}/live'
+            res = self._get(url, allow_redirects=True)
+            # 如果频道正在直播，会自动重定向到 watch?v=VIDEO_ID
+            match = re.search(r'v=([0-9A-Za-z_-]{11})', res.url)
+            if match:
+                return match.group(1)
+            # 如果没有重定向，尝试从网页中匹配
+            match_html = re.search(r'"videoId":"([0-9A-Za-z_-]{11})"', res.text)
+            if match_html:
+                return match_html.group(1)
+        except Exception as e:
+            debug_log('resolve channel live error', {'channel_id': channel_id, 'error': repr(e)})
+        return channel_id
+
+    def _get(self, url, **kwargs):
+        headers = self.headers.copy()
+        headers.update(kwargs.pop('headers', {}) or {})
+        response = self.session.get(url, headers=headers, timeout=kwargs.pop('timeout', 15), **kwargs)
+        response.raise_for_status()
+        return response
+
+    def _post_json(self, url, payload, headers=None):
+        final_headers = self.headers.copy()
+        final_headers.update({'Content-Type': 'application/json', 'Origin': 'https://www.youtube.com'})
+        if headers:
+            final_headers.update({k: v for k, v in headers.items() if v})
+        response = self.session.post(url, json=payload, headers=final_headers, timeout=15)
+        response.raise_for_status()
+        return response.json()
+
+    def _call_player_api(self, video_id, api_key, ytcfg, referer, visitor_data=None):
+        context = ytcfg.get('INNERTUBE_CONTEXT') or {
+            'client': {'clientName': 'WEB', 'clientVersion': '2.20240310.01.00', 'hl': 'en', 'gl': 'US'}
+        }
+        clients = [
+            {'client': {'clientName': 'ANDROID', 'clientVersion': '21.02.35', 'androidSdkVersion': 30, 'userAgent': 'com.google.android.youtube/21.02.35 (Linux; U; Android 11) gzip', 'osName': 'Android', 'osVersion': '11', 'hl': 'en', 'gl': 'US'}},
+            {'client': {'clientName': 'IOS', 'clientVersion': '21.02.3', 'deviceMake': 'Apple', 'deviceModel': 'iPhone16,2', 'userAgent': 'com.google.ios.youtube/21.02.3 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)', 'osName': 'iPhone', 'osVersion': '18.3.2.22D82', 'hl': 'en', 'gl': 'US'}},
+            {'client': {'clientName': 'MWEB', 'clientVersion': '2.20260115.01.00', 'userAgent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1', 'hl': 'en', 'gl': 'US'}},
+            context,
+        ]
+        for ctx in clients:
+            client = ctx.get('client') or {}
+            client_name = client.get('clientName') or 'WEB'
+            try:
+                url = f'https://www.youtube.com/youtubei/v1/player?key={quote(api_key)}&prettyPrint=false'
+                headers = {
+                    'Referer': referer,
+                    'X-YouTube-Client-Name': str(self._client_name_id(client_name)),
+                    'X-YouTube-Client-Version': client.get('clientVersion') or '',
+                }
+                if visitor_data:
+                    headers['X-Goog-Visitor-Id'] = visitor_data
+                if client.get('userAgent'):
+                    headers['User-Agent'] = client.get('userAgent')
+                payload = {
+                    'context': ctx,
+                    'videoId': video_id,
+                    'contentCheckOk': True,
+                    'racyCheckOk': True,
+                }
+                data = self._post_json(url, payload, headers=headers)
+                streaming = data.get('streamingData') or {}
+                status = (data.get('playabilityStatus') or {}).get('status')
+                debug_log('live api client', {
+                    'client': client_name,
+                    'status': status,
+                    'has_hls': bool(streaming.get('hlsManifestUrl')),
+                    'has_streaming': bool(streaming),
+                })
+                if streaming.get('hlsManifestUrl'):
+                    data['_client_name'] = client_name
+                    return data
+            except Exception as e:
+                debug_log('live api client error', {'client': client_name, 'error': repr(e)})
+        return None
+
+    def _extract_visitor_data(self, ytcfg, player_response):
+        return (
+            self.config.get('visitor_data')
+            or ytcfg.get('VISITOR_DATA')
+            or (((ytcfg.get('INNERTUBE_CONTEXT') or {}).get('client') or {}).get('visitorData'))
+            or ((player_response.get('responseContext') or {}).get('visitorData'))
+        )
+
+    def _extract_ytcfg(self, text):
+        match = re.search(r'ytcfg\.set\s*\(\s*({.+?})\s*\)\s*;', text or '', re.S)
+        if not match:
+            return None
+        try:
+            return json.loads(match.group(1))
+        except Exception:
+            return None
+
+    def _extract_initial_player_response(self, text):
+        return self._extract_json_after(text, 'ytInitialPlayerResponse')
+
+    def _extract_json_after(self, text, marker):
+        pos = (text or '').find(marker)
+        if pos < 0:
+            return None
+        start = text.find('{', pos)
+        if start < 0:
+            return None
+        depth = 0
+        in_str = None
+        escape = False
+        for index in range(start, len(text)):
+            char = text[index]
+            if escape:
+                escape = False
+                continue
+            if char == '\\':
+                escape = True
+                continue
+            if in_str:
+                if char == in_str:
+                    in_str = None
+                continue
+            if char in ('"', "'"):
+                in_str = char
+                continue
+            if char == '{':
+                depth += 1
+            elif char == '}':
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(text[start:index + 1])
+                    except Exception:
+                        return None
+        return None
+
+    @staticmethod
+    def _search(pattern, text, default=None):
+        match = re.search(pattern, text or '', re.S)
+        return match.group(1) if match else default
+
+    def _client_name_id(self, client_name):
+        return {
+            'WEB': 1,
+            'MWEB': 2,
+            'ANDROID': 3,
+            'IOS': 5,
+            'TVHTML5': 7,
+            'ANDROID_VR': 28,
+            'WEB_EMBEDDED_PLAYER': 56,
+            'WEB_REMIX': 67,
+        }.get(client_name, 1)
+
+
+class Spider(Spider):
+    def getName(self):
+        return 'YouTube直播'
+
+    def init(self, extend):
+        try:
+            self.extendDict = json.loads(extend) if extend else {}
+        except Exception:
+            self.extendDict = {}
+        self.session = requests.Session()
+        self.proxy_str = None
+        proxy_val = self.extendDict.get('proxy')
+        if proxy_val:
+            if isinstance(proxy_val, dict):
+                self.session.proxies = proxy_val
+                self.proxy_str = (proxy_val.get('http') or proxy_val.get('https') or '').replace('http://', '').replace('https://', '')
+            elif isinstance(proxy_val, str):
+                self.proxy_str = proxy_val.replace('http://', '').replace('https://', '')
+                proxy_url = f'http://{self.proxy_str}'
+                self.session.proxies = {'http': proxy_url, 'https': proxy_url}
+        self.header = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+            'Referer': 'https://www.youtube.com/'
+        }
+        self.session.headers.update(self.header)
+        self.yt = YouTubeLiveLite(self.session, self.header, self.extendDict)
+        self.search_page_cache = {}
+        self.hls_url_cache = {}
+        self.hls_proxy_enabled = self.extendDict.get('hls_proxy', True) is not False
+        debug_log('spider init', {'has_proxy': bool(self.proxy_str or self.session.proxies), 'hls_proxy': self.hls_proxy_enabled})
+
+    def homeContent(self, filter):
+        return {'class': LIVE_CLASSES}
+
+    def homeVideoContent(self):
+        # 首页推荐直接展示固定配置的频道列表，体验更爽
+        return self.categoryContent('fixed_live', 1, False, {})
+
+    def categoryContent(self, cid, page, filter, ext):
+        # 拦截分类请求：直接把预设的固定频道作为视频列表返回
+        videos = []
+        for ch in FIXED_CHANNELS:
+            vod_id = ch['vod_id']
+            # 如果是频道ID，生成的图片封面做特殊兼容
+            pic_id = 'default' if vod_id.startswith('UC') else vod_id
+            videos.append({
+                'vod_id': vod_id,
+                'vod_name': ch['vod_name'],
+                'vod_pic': f'https://img.youtube.com/vi/{pic_id}/hqdefault.jpg',
+                'vod_remarks': '固定频道',
+            })
+        return {
+            'list': videos, 
+            'page': 1, 
+            'pagecount': 1, 
+            'limit': len(videos), 
+            'total': len(videos)
+        }
+
+    def searchContent(self, key, quick, pg=1):
+        # 如果你想限制软件完全不能随便搜索，可以在这里直接返回固定列表；
+        # 否则保留原本的搜索逻辑（此处选择直接返回固定列表，实现完全锁死）。
+        return self.categoryContent('fixed_live', 1, False, {})
+
+    def detailContent(self, did):
+        video_id = did[0]
+        title = self._get_video_title(video_id)
+        status = '直播'
+        try:
+            data = self.yt.extract_live(video_id)
+            title = data.get('title') or title
+            if data.get('hls_url'):
+                status = '直播中'
+            elif data.get('status') == 'LIVE_STREAM_OFFLINE':
+                status = data.get('reason') or '未开播'
+            elif data.get('status') and data.get('status') != 'OK':
+                status = data.get('reason') or data.get('status')
+            else:
+                status = '无HLS'
+            debug_log('detail live status', {'video_id': video_id, 'status': status, 'has_hls': bool(data.get('hls_url'))})
+        except Exception as e:
+            debug_log('detail live error', {'video_id': video_id, 'error': repr(e)})
+        safe_title = self._safe_title(title)
+        vod = {
+            'vod_id': video_id,
+            'vod_name': title,
+            'vod_pic': f'https://img.youtube.com/vi/{video_id}/hqdefault.jpg',
+            'vod_remarks': status,
+            'vod_play_from': '直播',
+            'vod_play_url': f'{safe_title}${video_id}@live'
+        }
+        return {'list': [vod]}
+
+    def playerContent(self, flag, pid, vipFlags):
+        raw_pid = pid.split('$')[-1]
+        video_id = raw_pid.rsplit('@', 1)[0] if '@' in raw_pid else raw_pid
+        debug_log('player live', {'flag': flag, 'pid': pid, 'video_id': video_id})
+        try:
+            data = self.yt.extract_live(video_id)
+            hls_url = data.get('hls_url') or ''
+            if not hls_url:
+                status = data.get('status') or 'NO_HLS'
+                reason = data.get('reason') or '未获取到直播 HLS 地址'
+                debug_log('player live no hls', {'video_id': video_id, 'status': status, 'reason': reason})
+                raise Exception(reason)
+            if self.extendDict.get('hls_probe'):
+                self._probe_hls(video_id, hls_url)
+            play_url = hls_url
+            if self.hls_proxy_enabled:
+                play_url = self._cache_hls_url(hls_url, video_id, 'master')
+            debug_log('return live hls', {'video_id': video_id, 'url_len': len(hls_url), 'status': data.get('status'), 'proxy': self.hls_proxy_enabled})
+            return {
+                'parse': 0,
+                'jx': 0,
+                'url': play_url,
+                'header': self.header,
+                'format': 'application/x-mpegURL'
+            }
+        except Exception as e:
+            debug_log('player live error', {'video_id': video_id, 'error': repr(e)})
+            return {'parse': 1, 'jx': 1, 'url': pid}
+
+    def _probe_hls(self, video_id, hls_url):
+        try:
+            response = self.session.get(hls_url, headers=self.header, timeout=10)
+            full_text = response.text or ''
+            text = full_text[:5000]
+            lines = [line.strip() for line in full_text.splitlines() if line.strip()][:12]
+            variant_url = self._pick_variant_playlist(hls_url, full_text)
+            debug_log('hls master probe', {
+                'video_id': video_id,
+                'status': response.status_code,
+                'content_type': response.headers.get('content-type'),
+                'length': len(response.text or ''),
+                'has_extm3u': text.startswith('#EXTM3U'),
+                'has_stream_inf': '#EXT-X-STREAM-INF' in text,
+                'has_media_sequence': '#EXT-X-MEDIA-SEQUENCE' in text,
+                'variant': bool(variant_url),
+                'sample': lines,
+            })
+            if variant_url:
+                child = self.session.get(variant_url, headers=self.header, timeout=10)
+                child_text = child.text[:5000] if child.text else ''
+                child_lines = [line.strip() for line in child_text.splitlines() if line.strip()][:12]
+                debug_log('hls variant probe', {
+                    'video_id': video_id,
+                    'status': child.status_code,
+                    'content_type': child.headers.get('content-type'),
+                    'length': len(child.text or ''),
+                    'has_extm3u': child_text.startswith('#EXTM3U'),
+                    'has_media_sequence': '#EXT-X-MEDIA-SEQUENCE' in child_text,
+                    'has_segments': bool(re.search(r'^[^#].+', child_text, re.M)),
+                    'sample': child_lines,
+                })
+        except Exception as e:
+            debug_log('hls probe error', {'video_id': video_id, 'error': repr(e)})
+
+    def _pick_variant_playlist(self, base_url, text):
+        lines = [line.strip() for line in (text or '').splitlines()]
+        best_score = -1
+        best_url = ''
+        for index, line in enumerate(lines):
+            if not line.startswith('#EXT-X-STREAM-INF'):
+                continue
+            score = 0
+            bandwidth = re.search(r'BANDWIDTH=(\d+)', line)
+            resolution = re.search(r'RESOLUTION=(\d+)x(\d+)', line)
+            if bandwidth:
+                score += int(bandwidth.group(1))
+            if resolution:
+                score += int(resolution.group(1)) * int(resolution.group(2))
+            for next_line in lines[index + 1:]:
+                if not next_line or next_line.startswith('#'):
+                    continue
+                if score > best_score:
+                    best_score = score
+                    best_url = urljoin(base_url, next_line)
+                break
+        return best_url
+
+    HLS_TTL = {'master': 6 * 3600, 'playlist': 6 * 3600, 'media': 120, 'media_retry': 120}
+
+    def _hls_ttl(self, kind):
+        return self.HLS_TTL.get(kind, 180)
+
+    def _prune_hls_cache(self):
+        now = time.time()
+        expired = [k for k, v in self.hls_url_cache.items() if v.get('expires', 0) < now]
+        for k in expired:
+            self.hls_url_cache.pop(k, None)
+
+    def _cache_hls_url(self, target_url, video_id='', kind='media'):
+        self._prune_hls_cache()
+        self._hls_key_seq = getattr(self, '_hls_key_seq', 0) + 1
+        key = f'{int(time.time() * 1000)}_{self._hls_key_seq}'
+        self.hls_url_cache[key] = {
+            'url': target_url,
+            'video_id': video_id,
+            'kind': kind,
+            'expires': time.time() + self._hls_ttl(kind),
+        }
+        return f'http://127.0.0.1:9978/proxy?do=py&type=hls&key={quote(key)}'
+
+    def localProxy(self, params):
+        if params.get('do') != 'py' or params.get('type') != 'hls':
+            return None
+        key = params.get('key') or ''
+        item = self.hls_url_cache.get(key)
+        if not item or item.get('expires', 0) < time.time():
+            debug_log('hls proxy missing', {'key': key})
+            return [404, 'text/plain', 'HLS 缓存已过期']
+        item['expires'] = time.time() + self._hls_ttl(item.get('kind'))
+        target_url = item.get('url') or ''
+        try:
+            headers = self._hls_headers(target_url, item.get('kind'))
+            response = self.session.get(target_url, headers=headers, stream=True, timeout=15)
+            retried = False
+            if item.get('kind') == 'media' and response.status_code == 403:
+                retry_headers = self._hls_headers(target_url, 'media_retry')
+                response.close()
+                retried = True
+                response = self.session.get(target_url, headers=retry_headers, stream=True, timeout=15)
+            content_type = response.headers.get('content-type') or ''
+            is_m3u8 = item.get('kind') in ('master', 'playlist') or 'mpegurl' in content_type.lower() or target_url.split('?')[0].endswith('.m3u8')
+            debug_log('hls proxy response', {
+                'key': key,
+                'kind': item.get('kind'),
+                'status': response.status_code,
+                'content_type': content_type,
+                'is_m3u8': is_m3u8,
+                'url_len': len(target_url),
+                'path_tail': target_url.split('?')[0][-80:],
+                'retried': retried,
+            })
+            if is_m3u8:
+                text = response.text
+                rewritten = self._rewrite_m3u8(text, target_url, item.get('video_id') or '')
+                return [response.status_code, 'application/vnd.apple.mpegurl', rewritten, {'Content-Type': 'application/vnd.apple.mpegurl', 'Cache-Control': 'no-cache'}]
+            resp_headers = {'Content-Type': content_type or 'application/octet-stream', 'Cache-Control': 'no-cache'}
+            if response.headers.get('content-length'):
+                resp_headers['Content-Length'] = response.headers.get('content-length')
+            return [response.status_code, content_type or 'application/octet-stream', response.content, resp_headers]
+        except Exception as e:
+            debug_log('hls proxy error', {'key': key, 'error': repr(e)})
+            return [500, 'text/plain', f'HLS 代理失败: {str(e)}']
+
+    def _hls_headers(self, target_url, kind=None):
+        if kind == 'media_retry':
+            return {
+                'User-Agent': 'com.google.android.youtube/21.02.35 (Linux; U; Android 11) gzip',
+                'Accept': '*/*',
+            }
+        headers = self.header.copy()
+        headers['Accept'] = '*/*'
+        if kind in ('master', 'playlist'):
+            headers['Origin'] = 'https://www.youtube.com'
+            headers['Referer'] = 'https://www.youtube.com/'
+        elif kind == 'media':
+            headers['User-Agent'] = 'com.google.android.youtube/21.02.35 (Linux; U; Android 11) gzip'
+            headers.pop('Origin', None)
+            headers.pop('Referer', None)
+        return headers
+
+    def _rewrite_m3u8(self, text, base_url, video_id=''):
+        output = []
+        for line in (text or '').splitlines():
+            stripped = line.strip()
+            if not stripped:
+                output.append(line)
+                continue
+            if stripped.startswith('#'):
+                output.append(self._rewrite_m3u8_tag(line, base_url, video_id))
+                continue
+            absolute = urljoin(base_url, stripped)
+            kind = 'playlist' if stripped.endswith('.m3u8') or '/hls_playlist/' in stripped else 'media'
+            output.append(self._cache_hls_url(absolute, video_id, kind))
+        return '\n'.join(output) + '\n'
+
+    def _rewrite_m3u8_tag(self, line, base_url, video_id=''):
+        def replace_uri(match):
+            raw_url = match.group(1)
+            absolute = urljoin(base_url, raw_url)
+            proxied = self._cache_hls_url(absolute, video_id, 'media')
+            return f'URI="{proxied}"'
+        return re.sub(r'URI="([^"]+)"', replace_uri, line)
+
+    def _get_video_title(self, video_id):
+        # 兼容处理频道ID
+        if video_id.startswith('UC'):
+            return "动态获取的直播"
+        try:
+            response = self.session.get(f'https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={video_id}&format=json', timeout=5)
+            return response.json().get('title') or video_id
+        except Exception:
+            return video_id
+
+    def _safe_title(self, title):
+        if not title:
+            return 'live'
+        return re.sub(r'[#$@%&!?*|\\/:<>]', ' ', title)[:60]
