@@ -189,7 +189,11 @@ class YouTubeLite:
 
     def choose_playable(self, formats, quality=None):
         all_videos = [x for x in formats if x.get('vcodec') != 'none' and x.get('acodec') == 'none']
-        candidates = all_videos[:]
+        # candidates = all_videos[:]
+        
+        # 强制仅筛选高度小于等于 720P 的画质选项
+        candidates = [x for x in all_videos if int(x.get('height') or 0) <= 720]
+        
         if quality == '4k':
             candidates = [x for x in candidates if int(x.get('height') or 0) >= 2160]
         elif quality == '2k':
@@ -242,7 +246,11 @@ class YouTubeLite:
 
     def choose_video_tracks(self, formats, quality=None):
         videos = [x for x in formats if x.get('vcodec') != 'none' and x.get('acodec') == 'none']
-        cap = 2160 if quality in ('best', '4k') else 1440 if quality == '2k' else 1080
+        # cap = 2160 if quality in ('best', '4k') else 1440 if quality == '2k' else 1080
+        
+        # 将最高画质上限设定为 720P
+        cap = 720
+        
         videos = [x for x in videos if int(x.get('height') or 0) <= cap] or videos
         vp9 = [x for x in videos if self._video_codec_priority(x) >= 3]
         if vp9:
