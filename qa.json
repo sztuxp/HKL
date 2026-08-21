@@ -9,7 +9,7 @@
   			"type": 3,
   			"api": "https://raw.githubusercontent.com/sztuxp/HKL/refs/heads/main/py/youtube2.py"
 			"ext": {
-    			"seg": "direct"   // 让视频分段直连，减轻盒子本地代理服务器的压力
+    			"seg": "direct"
   			}
   		}
     ],
