@@ -732,6 +732,10 @@ class Spider(Spider):
         except Exception:
             self.extendDict = {}
         self.session = requests.Session()
+        # 【新增】：增大 HTTP 连接池，复用 TCP 连接，专治安卓盒子超时
+        adapter = requests.adapters.HTTPAdapter(pool_connections=20, pool_maxsize=20, max_retries=2)
+        self.session.mount('https://', adapter)
+        self.session.mount('http://', adapter)
         self.proxy_str = None
         proxy_val = self.extendDict.get('proxy')
         if proxy_val:
