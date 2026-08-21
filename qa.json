@@ -7,7 +7,10 @@
               "key":"youtube2",
               "name":"非诚勿扰",
   			"type": 3,
-  			"api": "https://ghfast.top/https://raw.githubusercontent.com/sztuxp/HKL/refs/heads/main/py/youtube2.py"
+  			"api": "https://raw.githubusercontent.com/sztuxp/HKL/refs/heads/main/py/youtube2.py"
+			"ext": {
+    			"seg": "direct"   // 让视频分段直连，减轻盒子本地代理服务器的压力
+  			}
   		}
     ],
     "lives": [
