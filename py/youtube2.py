@@ -61,7 +61,8 @@ class YouTubeLite:
         self.player_cache = {}
         self.extract_cache = {}
         self.sig_plan_cache = {}
-        self.extract_cache_ttl = int(self.config.get('extract_cache_ttl') or 300)
+        # 将解析缓存时间缩短为 120 秒，避免加载到过期的播放地址
+        self.extract_cache_ttl = int(self.config.get('extract_cache_ttl') or 120)
 
     def extract(self, url_or_id):
         video_id = self.extract_video_id(url_or_id)
@@ -1022,6 +1023,7 @@ class Spider(Spider):
         debug_log('proxy mpd tracks', {'vid': vid, 'quality': quality, 'tracks': [{'name': x.get('track_name'), 'itag': x.get('itag')} for x in video_tracks], 'audio': audio_item.get('itag'), 'direct': direct_segments, 'duration': duration_pt})
         return [200, 'application/dash+xml', mpd]
 
+    # def _proxy_media(self, params):
     def _proxy_media(self, params):
         vid = params.get('vid')
         quality = params.get('quality') or '1080p'
@@ -1039,15 +1041,27 @@ class Spider(Spider):
             target_url = data.get('audio_url') or media_item.get('url')
         if not target_url:
             return [404, 'text/plain', f'{track} 流不存在']
-        headers = self.header.copy()
-        headers.update((media_item or {}).get('headers') or {})
+            
+        # ================= 优化点：清理干扰 Header =================
+        # 请求真实媒体切片时，采用纯净的 Android User-Agent，且移除 Referer/Origin
+        headers = {
+            'User-Agent': (media_item or {}).get('headers', {}).get('User-Agent') or 'com.google.android.youtube/21.02.35 (Linux; U; Android 11) gzip',
+            'Accept': '*/*',
+        }
+        # =========================================================
+
         range_header = params.get('range') or params.get('Range')
         if range_header:
             headers['Range'] = range_header
         try:
             r = self.session.get(target_url, headers=headers, stream=True, timeout=30)
+            
+            # 如果请求遭遇 403，尝试移除全量 Header 进行二次重试（防 403 兜底）
+            if r.status_code == 403:
+                r.close()
+                r = self.session.get(target_url, headers={'User-Agent': 'Mozilla/5.0'}, stream=True, timeout=30)
+
             content_type = r.headers.get('content-type', 'application/octet-stream')
-            debug_log('proxy media response', {'track': track, 'itag': media_item.get('itag'), 'track_name': media_item.get('track_name'), 'status': r.status_code, 'range': range_header, 'content_type': content_type, 'content_length': r.headers.get('content-length'), 'content_range': r.headers.get('content-range')})
             resp_headers = {'Content-Type': content_type, 'Accept-Ranges': 'bytes', 'Cache-Control': 'no-cache'}
             if r.headers.get('content-range'):
                 resp_headers['Content-Range'] = r.headers.get('content-range')
